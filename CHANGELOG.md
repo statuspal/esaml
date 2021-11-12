@@ -2,6 +2,11 @@
 
 All changes are in the `main` branch (`master` remains unchanged).
 
+### v4.2.1
++   Update license copyright
++   Remove overly restrictive semantic versioning of deps for hex in elixir
++   Modify APIs to use non-deprecated functions for recent versions of erlang
+
 ### v4.2.0
 
 +   Erlang 21.x compatibility fix - PR #15 from [zwilias](https://github.com/zwilias)
