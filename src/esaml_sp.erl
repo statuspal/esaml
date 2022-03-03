@@ -241,7 +241,24 @@ validate_assertion(Xml, SP = #esaml_sp{}) ->
 validate_assertion(Xml, DuplicateFun, SP = #esaml_sp{}) ->
     Ns = [{"samlp", 'urn:oasis:names:tc:SAML:2.0:protocol'},
           {"saml", 'urn:oasis:names:tc:SAML:2.0:assertion'}],
+    SuccessStatus = "urn:oasis:names:tc:SAML:2.0:status:Success",
     esaml_util:threaduntil([
+        fun(X) ->
+            case xmerl_xpath:string("/samlp:Response/samlp:Status/samlp:StatusCode/@Value", X, [{namespace, Ns}]) of
+                [StatusCode] ->
+                    case StatusCode#xmlAttribute.value of
+                        SuccessStatus -> X;
+                        ErrorStatus ->
+                            ErrorMessage = case xmerl_xpath:string("/samlp:Response/samlp:Status/samlp:StatusMessage/text()", X, [{namespace, Ns}]) of
+                                [] -> undefined;
+                                [A] -> lists:flatten(xmerl_xs:value_of(A));
+                                _ -> malformed
+                            end,
+                            {error, {saml_error, ErrorStatus, ErrorMessage}}
+                    end;
+                _ -> {error, bad_saml}
+            end
+        end,
         fun(X) ->
             case xmerl_xpath:string("/samlp:Response/saml:EncryptedAssertion", X, [{namespace, Ns}]) of
                 [A1] ->
