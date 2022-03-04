@@ -17,7 +17,10 @@
 -export([start_ets/0, check_dupe_ets/2]).
 -export([folduntil/3, thread/2, threaduntil/2]).
 -export([build_nsinfo/2]).
--export([load_private_key/1, load_certificate_chain/1, load_certificate/1, load_metadata/2, load_metadata/1]).
+-export([load_private_key/1, import_private_key/2]).
+-export([load_certificate_chain/1, import_certificate_chain/2]).
+-export([load_certificate/1, import_certificate/2]).
+-export([load_metadata/2, load_metadata/1]).
 -export([convert_fingerprints/1]).
 -export([unique_id/0]).
 
@@ -117,60 +120,111 @@ build_nsinfo(_Ns, Other) -> Other.
 start_ets() ->
     case erlang:whereis(esaml_ets_table_owner) of
         undefined ->
-            {ok, spawn_link(fun() ->
-                register(esaml_ets_table_owner, self()),
-                ets:new(esaml_assertion_seen, [set, public, named_table]),
-                ets:new(esaml_privkey_cache, [set, public, named_table]),
-                ets:new(esaml_certbin_cache, [set, public, named_table]),
-                ets:new(esaml_idp_meta_cache, [set, public, named_table]),
-                ets_table_owner()
-            end)};
-        Pid -> {ok, Pid}
+            create_tables();
+        Pid ->
+            Pid ! {self(), check_ready},
+            receive
+                {Pid, ready} -> {ok, Pid}
+            end
     end.
+
+%% @private
+create_tables() ->
+    Caller = self(),
+    Pid = spawn_link(fun() ->
+              register(esaml_ets_table_owner, self()),
+              ets:new(esaml_assertion_seen, [set, public, named_table]),
+              ets:new(esaml_privkey_cache, [set, public, named_table]),
+              ets:new(esaml_certbin_cache, [set, public, named_table]),
+              ets:new(esaml_idp_meta_cache, [set, public, named_table]),
+              Caller ! {self(), ready},
+              ets_table_owner()
+         end),
+
+    receive
+        {Pid, ready} -> ok
+    end,
+
+    {ok, Pid}.
 
 %% @private
 ets_table_owner() ->
     receive
-        stop -> ok;
-        _ -> ets_table_owner()
+        stop ->
+            ok;
+        {Caller, check_ready} ->
+            Caller ! {self(), ready},
+            ets_table_owner();
+        _ ->
+            ets_table_owner()
     end.
 
 %% @doc Loads a private key from a file on disk (or ETS memory cache)
 -spec load_private_key(Path :: string()) -> #'RSAPrivateKey'{}.
 load_private_key(Path) ->
     case ets:lookup(esaml_privkey_cache, Path) of
-        [{_, Key}] -> Key;
+        [{_, Key}] ->
+            Key;
         _ ->
             {ok, KeyFile} = file:read_file(Path),
-            [KeyEntry] = public_key:pem_decode(KeyFile),
-            Key = case public_key:pem_entry_decode(KeyEntry) of
-                #'PrivateKeyInfo'{privateKey = KeyData} ->
-                    KeyDataBin = if is_list(KeyData) -> list_to_binary(KeyData);
-                                    true -> KeyData
-                                 end,
-                    public_key:der_decode('RSAPrivateKey', KeyDataBin);
-                Other -> Other
-            end,
-            ets:insert(esaml_privkey_cache, {Path, Key}),
-            Key
+            do_import_private_key(KeyFile, Path)
     end.
 
+-spec import_private_key(EncodedKey :: string(), Identifier :: term()) -> #'RSAPrivateKey'{}.
+import_private_key(EncodedKey, Identifier) ->
+    case ets:lookup(esaml_privkey_cache, Identifier) of
+        [{_, Key}] -> Key;
+        _ -> do_import_private_key(EncodedKey, Identifier)
+    end.
+
+do_import_private_key(EncodedKey, Identifier) ->
+    [KeyEntry] = public_key:pem_decode(EncodedKey),
+    Key = case public_key:pem_entry_decode(KeyEntry) of
+              #'PrivateKeyInfo'{privateKey = KeyData} ->
+                  KeyDataBin = if is_list(KeyData) -> list_to_binary(KeyData);
+                                  true -> KeyData
+                               end,
+                  public_key:der_decode('RSAPrivateKey', KeyDataBin);
+              Other -> Other
+          end,
+    ets:insert(esaml_privkey_cache, {Identifier, Key}),
+    Key.
+
 -spec load_certificate(Path :: string()) -> binary().
-load_certificate(CertPath) ->
-    [CertBin] = load_certificate_chain(CertPath),
+load_certificate(Path) ->
+    [CertBin] = load_certificate_chain(Path),
+    CertBin.
+
+-spec import_certificate(EncodedCert :: string(), Identifier :: term()) -> binary().
+import_certificate(EncodedCert, Identifier) ->
+    [CertBin] = import_certificate_chain(EncodedCert, Identifier),
     CertBin.
 
 %% @doc Loads certificate chain from a file on disk (or ETS memory cache)
 -spec load_certificate_chain(Path :: string()) -> [binary()].
-load_certificate_chain(CertPath) ->
-    case ets:lookup(esaml_certbin_cache, CertPath) of
-        [{_, CertChain}] -> CertChain;
+load_certificate_chain(Path) ->
+    case ets:lookup(esaml_certbin_cache, Path) of
+        [{_, CertChain}] ->
+            CertChain;
         _ ->
-            {ok, CertFile} = file:read_file(CertPath),
-            CertChain = [CertBin || {'Certificate', CertBin, not_encrypted} <- public_key:pem_decode(CertFile)],
-            ets:insert(esaml_certbin_cache, {CertPath, CertChain}),
-            CertChain
+            {ok, EncodedCert} = file:read_file(Path),
+            do_import_certificate_chain(EncodedCert, Path)
     end.
+
+%% @doc Loads certificate chain from a file on disk (or ETS memory cache)
+-spec import_certificate_chain(EncodedCerts :: string(), Identifier :: string()) -> [binary()].
+import_certificate_chain(EncodedCerts, Identifier) ->
+    case ets:lookup(esaml_certbin_cache, Identifier) of
+        [{_, CertChain}] ->
+            CertChain;
+        _ ->
+            do_import_certificate_chain(EncodedCerts, Identifier)
+    end.
+
+do_import_certificate_chain(EncodedCerts, Identifier) ->
+    CertChain = [CertBin || {'Certificate', CertBin, not_encrypted} <- public_key:pem_decode(EncodedCerts)],
+    ets:insert(esaml_certbin_cache, {Identifier, CertChain}),
+    CertChain.
 
 %% @doc Reads IDP metadata from a URL (or ETS memory cache) and validates the signature
 -spec load_metadata(Url :: string(), Fingerprints :: [string() | binary()]) -> esaml:idp_metadata().
@@ -288,6 +342,42 @@ build_nsinfo_test() ->
     E3 = #xmlElement{name = 'blah:George', content = [E2]},
     E3Ns = E3#xmlElement{nsinfo = {"blah", "George"}, namespace = FooNs, content = [E2Ns]},
     E3Ns = build_nsinfo(FooNs, E3).
+
+key_load_test() ->
+    start_ets(),
+    KeyPath = "../test/selfsigned_key.pem",
+    Key = load_private_key(KeyPath),
+    ?assertEqual([{KeyPath, Key}], ets:lookup(esaml_privkey_cache, KeyPath)).
+
+key_import_test() ->
+    start_ets(),
+    {ok, EncodedKey} = file:read_file("../test/selfsigned_key.pem"),
+    Key = import_private_key(EncodedKey, my_key),
+    ?assertEqual([{my_key, Key}], ets:lookup(esaml_privkey_cache, my_key)).
+
+bad_key_load_test() ->
+    start_ets(),
+    KeyPath = "../test/bad_data.pem",
+    ?assertException(error, {badmatch, []}, load_private_key(KeyPath)),
+    ?assertEqual([], ets:lookup(esaml_privkey_cache, KeyPath)).
+
+cert_load_test() ->
+    start_ets(),
+    CertPath = "../test/selfsigned.pem",
+    Cert = load_certificate(CertPath),
+    ?assertEqual([{CertPath, [Cert]}], ets:lookup(esaml_certbin_cache, CertPath)).
+
+cert_import_test() ->
+    start_ets(),
+    {ok, EncodedCert} = file:read_file("../test/selfsigned.pem"),
+    Cert = import_certificate(EncodedCert, my_cert),
+    ?assertEqual([{my_cert, [Cert]}], ets:lookup(esaml_certbin_cache, my_cert)).
+
+bad_cert_load_test() ->
+    start_ets(),
+    CertPath = "../test/bad_data.pem",
+    ?assertException(error, {badmatch, []}, load_certificate(CertPath)),
+    ?assertEqual([{CertPath, []}], ets:lookup(esaml_certbin_cache, CertPath)).
 
 -include("xmerl_xpath_macros.hrl").
 
