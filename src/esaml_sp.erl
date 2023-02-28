@@ -246,7 +246,9 @@ validate_assertion(Xml, DuplicateFun, SP = #esaml_sp{}) ->
             case xmerl_xpath:string("/samlp:Response/saml:EncryptedAssertion", X, [{namespace, Ns}]) of
                 [A1] ->
                     try
-                        io:format("Validate assertion first path", []),
+                        io:format("Validate assertion first path~n", []),
+                        io:format("A1: ~w ~n", [A1]),
+                        io:format("SP: ~w ~n", [SP]),
                         #xmlElement{} = DecryptedAssertion = decrypt_assertion(A1, SP),
                         xmerl_xpath:string("/saml:Assertion", DecryptedAssertion, [{namespace, Ns}]) of
                         [A2] -> A2
@@ -254,9 +256,11 @@ validate_assertion(Xml, DuplicateFun, SP = #esaml_sp{}) ->
                         _Error:_Reason -> {error, bad_assertion}
                     end;
                 _ ->
-                    io:format("Validate assertion second path", []),
+                    io:format("Validate assertion second path~n", []),
                     case xmerl_xpath:string("/samlp:Response/saml:Assertion", X, [{namespace, Ns}]) of
-                        [A3] -> A3;
+                        [A3] -> 
+                            io:format("A3: ~w ~n", [A3]),
+                            A3;
                         _ -> {error, bad_assertion}
                     end
             end
